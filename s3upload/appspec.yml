@@ -1,0 +1,20 @@
+version: 0.0
+os: linux
+files:
+  - source: api
+    destination: /node/s3upload
+hooks:
+  ApplicationStop:
+    - location: scripts/deregister_from_elb.sh
+      timeout: 300
+      runas: root
+    - location: scripts/stop_api.sh
+      timeout: 180
+      runas: root
+  ApplicationStart:
+    - location: scripts/start_api.sh
+      timeout: 180
+      runas: root
+    - location: scripts/register_with_elb.sh
+      timeout: 300
+      runas: root

@@ -1,0 +1,1299 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+
+  # General:
+  BuildVersion:
+    Type: Number
+    Description: Used to keep track of versioning and force updates of cfn-init.
+    Default: 1.0
+    
+  NamingPrefix:
+    Type: String
+    Description: The naming prefix for resources created by this template, and exported values that can be referenced by other stacks.
+    
+  VPCIPv4CidrBlock:
+    Description: VPC CIDR block for IPv4. Default of 10.0.0.0/16 is recommended for testing.
+    Type: String
+    Default: 10.0.0.0/16
+    
+  VPCSubnetIPv4Size:
+    Description: Host bit mask length of each subnet, e.g. default of 4 will be a /28 subnet size.
+    Type: Number
+    Default: 8
+    
+  VPCNumberOfIPv4Subnets:
+    Description: Number of equally sized IPv4 subnets that will be created within the VPC CIDR block. 
+    Type: Number
+    Default: 256
+    
+  AvailabilityZone1:
+    Description: First AZ used by the system.
+    Type: AWS::EC2::AvailabilityZone::Name
+    
+  AvailabilityZone2:
+    Description: Second AZ used by the system.
+    Type: AWS::EC2::AvailabilityZone::Name
+    
+  AvailabilityZoneBastion:
+    Description: AZ used by the bastion.
+    Type: AWS::EC2::AvailabilityZone::Name
+
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t1.micro
+      - t2.nano
+      - t2.micro
+      - t2.small
+      - t2.medium
+    ConstraintDescription: Must be a valid EC2 instance type.
+    
+  CodeBucketName:
+    Description: Name of bucket used by CodeDeploy/CodePipeline.
+    Type: String
+    AllowedPattern: "(?=^.{3,63}$)(?!^(\\d+\\.)+\\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\\-]*[a-z0-9])\\.)*([a-z0-9]|[a-z0-9][a-z0-9\\-]*[a-z0-9])$)"
+    ConstraintDescription: Must follow valid bucket naming conventions.
+    
+  WebBucketName:
+    Description: Name of bucket used for the front-end.
+    Type: String
+    AllowedPattern: "(?=^.{3,63}$)(?!^(\\d+\\.)+\\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\\-]*[a-z0-9])\\.)*([a-z0-9]|[a-z0-9][a-z0-9\\-]*[a-z0-9])$)"
+    ConstraintDescription: Must follow valid bucket naming conventions.
+      
+  OperatorEmail:
+    Description: Email address to notify if there are any scaling operations
+    Type: String
+    AllowedPattern: "([a-zA-Z0-9_\\-\\.]+)@((\\[[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.)|(([a-zA-Z0-9\\-]+\\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\\]?)"
+    ConstraintDescription: Must be a valid email address.
+
+  KeyName:
+    Description: The EC2 Key Pair to allow SSH access to the instances
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Must be the name of an existing EC2 KeyPair.
+
+  SafeNetwork:
+    Description: The IP address range that can be used to SSH to bastion hosts.
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: Must be a valid IP CIDR range of the form x.x.x.x/x.
+    #Default: 0.0.0.0/0
+    
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups: 
+      - 
+        Label: 
+          default: "General Configuration"
+        Parameters:
+          - BuildVersion
+          - NamingPrefix
+          - VPCIPv4CidrBlock
+          - VPCSubnetIPv4Size
+          - VPCNumberOfIPv4Subnets
+          - AvailabilityZone1
+          - AvailabilityZone2
+          - AvailabilityZoneBastion
+          - InstanceType
+          - SafeNetwork
+          - KeyName
+          - CodeBucketName
+          - WebBucketName
+          - OperatorEmail
+
+Mappings:
+  AWSInstanceRegionMap:
+    us-east-1: 
+      "HVM64": "ami-047a51fa27710816e"
+    us-east-2: 
+      "HVM64": "ami-01aab85a5e4a5a0fe"
+    us-west-1: 
+      "HVM64": "ami-005c06c6de69aee84"
+    us-west-2: 
+      "HVM64": "ami-0e999cbd62129e3b1"
+
+  Region2Examples:
+    us-east-1:
+      Examples: https://s3.amazonaws.com/cloudformation-examples-us-east-1
+    us-east-2:
+      Examples: https://s3-us-east-2.amazonaws.com/cloudformation-examples-us-east-2
+    us-west-1:
+      Examples: https://s3-us-west-1.amazonaws.com/cloudformation-examples-us-west-1
+    us-west-2:
+      Examples: https://s3-us-west-2.amazonaws.com/cloudformation-examples-us-west-2
+
+Resources:
+  #
+  # S3 Bucket for CodeDeploy/CodePipeline
+  #
+  CodeBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties: 
+      BucketName: !Sub '${CodeBucketName}'
+      Tags:
+        - Key: Name
+          Value: !Sub '${CodeBucketName}'
+
+  #
+  # S3 Bucket for React front-end
+  #
+  WebBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub '${WebBucketName}'
+      Tags:
+        - Key: Name
+          Value: !Sub '${WebBucketName}'
+      AccessControl: PublicRead
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+
+  WebBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebBucket
+      PolicyDocument:
+        Id: WebBucketPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: 
+              - !Sub 
+                - '${BucketArn}/*'
+                - { BucketArn: !GetAtt WebBucket.Arn }
+
+  #
+  # Logging Stuffs
+  #
+  InstanceRole:
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-iam-role.html
+    Type: 'AWS::IAM::Role'
+    DependsOn:
+      - CodeBucket
+      - LoadBalancer1
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                -  ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: LogPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'logs:DescribeLogStreams'
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+        - PolicyName: S3AppPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:PutObjectAcl'
+                  - 's3:DeleteObject'
+                Resource:
+                  - 'arn:aws:s3:::foo.ryanwendel.com/books/*'
+                  - 'arn:aws:s3:::bar.ryanwendel.com/files/images/*'
+        - PolicyName: S3CodePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub 
+                    - '${BucketArn}/*'
+                    - { BucketArn: !GetAtt CodeBucket.Arn }
+        - PolicyName: EC2Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:CreateTags'
+                Resource:
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:*/*'
+        - PolicyName: ELBPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'elasticloadbalancing:DescribeTargetGroupAttributes'
+                  - 'elasticloadbalancing:DescribeTargetGroups'
+                  - 'elasticloadbalancing:DescribeTargetHealth'
+                  - 'elasticloadbalancing:DeregisterTargets'
+                  - 'elasticloadbalancing:RegisterTargets'
+                Resource:
+                  - !Ref LoadBalancer1
+        - PolicyName: ASGPolicy1
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'autoscaling:DescribeAutoScalingInstances'
+                  - 'autoscaling:DescribeAutoScalingGroups'
+                Resource:
+                  - '*'
+        - PolicyName: ASGPolicy2
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'autoscaling:EnterStandby'
+                  - 'autoscaling:ExitStandby'
+                  - 'autoscaling:UpdateAutoScalingGroup'
+                  - 'autoscaling:SuspendProcesses'
+                  - 'autoscaling:ResumeProcesses'
+                Resource:
+                  - !Sub 'arn:aws:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${NamingPrefix}*' 
+  
+  InstanceProfile:
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-iam-instanceprofile.html
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref InstanceRole
+
+  CloudFormationLogs:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      RetentionInDays: 7
+      
+  #
+  #VPC
+  #   
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-vpc.html
+      CidrBlock: !Ref VPCIPv4CidrBlock
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-VPC'
+    
+  #
+  # Internet Gateway
+  #    
+  IGW:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-internetgateway.html
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-IGW'
+              
+  IGWAttach:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-vpc-gateway-attachment.html
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref IGW
+      #VpnGatewayId
+   
+  #
+  # Route Stuffs
+  #   
+  RouteTableInternet:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-route-table.html
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Internet'
+              
+  RouteTablePrivate:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-route-table.html
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Private'
+              
+  RouteInternet:
+    Type: 'AWS::EC2::Route'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-route.html
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      #DestinationIpv6CidrBlock: ::/0
+      #EgressOnlyInternetGatewayId
+      GatewayId: !Ref IGW
+      #InstanceId
+      #NatGatewayId
+      #NetworkInterfaceId
+      RouteTableId: !Ref RouteTableInternet
+      #VpcPeeringConnectionId
+      
+  RoutePrivate:
+    Type: AWS::EC2::Route
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-route.html
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      #DestinationIpv6CidrBlock: ::/0
+      #EgressOnlyInternetGatewayId
+      #GatewayId
+      #InstanceId
+      NatGatewayId: !Ref NATGateway
+      #NetworkInterfaceId
+      RouteTableId: !Ref RouteTablePrivate
+      #VpcPeeringConnectionId
+              
+  RouteTableAssocBastion:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+    DependsOn:
+      - SubnetBastion
+      - RouteTableInternet
+    Properties:
+      RouteTableId: !Ref RouteTableInternet
+      SubnetId: !Ref SubnetBastion
+      
+  RouteTableAssocPublic1:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+    DependsOn:
+      - SubnetPublic1
+      - RouteTableInternet
+    Properties:
+      RouteTableId: !Ref RouteTableInternet
+      SubnetId: !Ref SubnetPublic1
+      
+  RouteTableAssocPublic2:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+    DependsOn:
+      - SubnetPublic2
+      - RouteTableInternet
+    Properties:
+      RouteTableId: !Ref RouteTableInternet
+      SubnetId: !Ref SubnetPublic2
+
+  RouteTableAssocPrivate1:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+    DependsOn:
+      - SubnetPrivate1
+      - RouteTablePrivate
+    Properties:
+      RouteTableId: !Ref RouteTablePrivate
+      SubnetId: !Ref SubnetPrivate1
+      
+  RouteTableAssocPrivate2:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+    DependsOn:
+      - SubnetPrivate2
+      - RouteTablePrivate
+    Properties:
+      RouteTableId: !Ref RouteTablePrivate
+      SubnetId: !Ref SubnetPrivate2
+      
+  RouteTableAssocMongo1:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+    DependsOn:
+      - SubnetMongo1
+      - RouteTablePrivate
+    Properties:
+      RouteTableId: !Ref RouteTablePrivate
+      SubnetId: !Ref SubnetMongo1
+
+  RouteTableAssocMongo2:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+    DependsOn:
+      - SubnetMongo2
+      - RouteTablePrivate
+    Properties:
+      RouteTableId: !Ref RouteTablePrivate
+      SubnetId: !Ref SubnetMongo2
+      
+  
+  #
+  # Subnets
+  #  
+  SubnetBastion:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZoneBastion
+      CidrBlock: !Select [ 0, !Cidr [ !GetAtt VPC.CidrBlock, !Ref VPCNumberOfIPv4Subnets, !Ref VPCSubnetIPv4Size ]]
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Bastion'
+                            
+  SubnetPublic1:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZone1
+      CidrBlock: !Select [ 1, !Cidr [ !GetAtt VPC.CidrBlock, !Ref VPCNumberOfIPv4Subnets, !Ref VPCSubnetIPv4Size ]]
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Public-1'
+              
+  SubnetPublic2:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZone2
+      CidrBlock: !Select [ 2, !Cidr [ !GetAtt VPC.CidrBlock, !Ref VPCNumberOfIPv4Subnets, !Ref VPCSubnetIPv4Size ]]
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Public-2'
+              
+  SubnetPrivate1:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZone1
+      CidrBlock: !Select [ 3, !Cidr [ !GetAtt VPC.CidrBlock, !Ref VPCNumberOfIPv4Subnets, !Ref VPCSubnetIPv4Size ]]
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Private-1'
+              
+  SubnetPrivate2:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZone2
+      CidrBlock: !Select [ 4, !Cidr [ !GetAtt VPC.CidrBlock, !Ref VPCNumberOfIPv4Subnets, !Ref VPCSubnetIPv4Size ]]
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Private-2'
+              
+  SubnetMongo1:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZone1
+      CidrBlock: !Select [ 5, !Cidr [ !GetAtt VPC.CidrBlock, !Ref VPCNumberOfIPv4Subnets, !Ref VPCSubnetIPv4Size ]]
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Mongo-1'
+
+  SubnetMongo2:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZone2
+      CidrBlock: !Select [ 6, !Cidr [ !GetAtt VPC.CidrBlock, !Ref VPCNumberOfIPv4Subnets, !Ref VPCSubnetIPv4Size ]]
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Mongo-2'
+    
+  #
+  # Network ACLs
+  #    
+  NetworkAclBastion:
+    Type: 'AWS::EC2::NetworkAcl'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Bastion'
+          
+  AclAssocationBastion:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetBastion
+      NetworkAclId: !Ref NetworkAclBastion
+      
+  AclEntryBastion:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclBastion
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'false'
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: '1'
+        To: '65535'
+        
+  AclEgressBastion:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclBastion
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'true'
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: '1'
+        To: '65535'
+        
+  NetworkAclPublic:
+    Type: 'AWS::EC2::NetworkAcl'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Public'
+          
+  AclAssocationPublic1:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetPublic1
+      NetworkAclId: !Ref NetworkAclPublic
+      
+  AclAssocationPublic2:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetPublic2
+      NetworkAclId: !Ref NetworkAclPublic
+        
+  AclEntryPublic:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPublic
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'false'
+      #CidrBlock: !Ref VPCIPv4CidrBlock
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: '1'
+        To: '65535'
+
+  AclEgressPublic:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPublic
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'true'
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: '1'
+        To: '65535' 
+
+  NetworkAclPrivate:
+    Type: 'AWS::EC2::NetworkAcl'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Private'
+          
+  AclAssocationPrivate1:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetPrivate1
+      NetworkAclId: !Ref NetworkAclPrivate
+
+  AclAssocationPrivate2:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetPrivate2
+      NetworkAclId: !Ref NetworkAclPrivate
+      
+  AclEntryPrivate:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPrivate
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'false'
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: '1'
+        To: '65535'
+      
+  AclEgressPrivate:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPrivate
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'true'
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: '1'
+        To: '65535'
+        
+  NetworkAclMongo:
+    Type: 'AWS::EC2::NetworkAcl'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Mongo'
+          
+  AclAssocationMongo1:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetMongo1
+      NetworkAclId: !Ref NetworkAclMongo
+
+  AclAssocationMongo2:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetMongo2
+      NetworkAclId: !Ref NetworkAclMongo
+      
+  AclEntryMongo:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclMongo
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'false'
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: '1'
+        To: '65535'
+        
+  AclEgressMongo:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclMongo
+      RuleNumber: '100'
+      Protocol: '-1'
+      RuleAction: allow
+      Egress: 'true'
+      CidrBlock: '0.0.0.0/0'
+      PortRange:
+        From: '1'
+        To: '65535'
+     
+  #
+  # Security Groups
+  #
+  SecurityGroupBastion:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${NamingPrefix}-Bastion'
+      GroupDescription: Allows connections to bastion instances
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Bastion'
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: !Ref SafeNetwork
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: !Ref SafeNetwork
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: !Ref SafeNetwork
+        
+  SecurityGroupElb:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${NamingPrefix}-ELB'
+      GroupDescription: Allows connections to ELB
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-ELB'
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: !Ref SafeNetwork
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: !Ref SafeNetwork
+        
+  SecurityGroupPublic:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${NamingPrefix}-Public'
+      GroupDescription: Allow connections to EC2 instances in public subnet
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Public'
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 1
+        ToPort: 65535
+        SourceSecurityGroupId: !Ref SecurityGroupBastion
+      - IpProtocol: tcp
+        FromPort: 1
+        ToPort: 65535
+        SourceSecurityGroupId: !Ref SecurityGroupElb
+      - IpProtocol: tcp
+        FromPort: 1
+        ToPort: 65535
+        SourceSecurityGroupId: !Ref SecurityGroupPrivate
+
+  SecurityGroupPrivate:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${NamingPrefix}-Private'
+      GroupDescription: Allow connections to EC2 instances in private subnet
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Private'
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 1
+        ToPort: 65535
+        SourceSecurityGroupId: !Ref SecurityGroupBastion
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        SourceSecurityGroupId: !Ref SecurityGroupElb
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        SourceSecurityGroupId: !Ref SecurityGroupElb
+
+  SecurityGroupMongo:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${NamingPrefix}-Mongo'
+      GroupDescription: Allows connections to mongodb instance
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Mongo'
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        SourceSecurityGroupId: !Ref SecurityGroupBastion
+      - IpProtocol: tcp
+        FromPort: 27017
+        ToPort: 27017
+        SourceSecurityGroupId: !Ref SecurityGroupPrivate
+
+  #
+  # NAT Gateway
+  #
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: NATGatewayEIP
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-natgateway.html
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref SubnetPublic1
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-NATGateway'
+  
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: VPC
+      
+  #
+  # Load Balancers
+  #
+  LoadBalancer1:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${NamingPrefix}-ELB-1'
+      Type: application
+      Subnets: 
+        - !Ref SubnetPublic1
+        - !Ref SubnetPublic2
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref SecurityGroupElb
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-ELB-1'
+
+  LoadBalancer1Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer1
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup1
+          
+  TargetGroup1:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${NamingPrefix}-Target-Group-1'
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /health
+      HealthCheckTimeoutSeconds: 3
+      HealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+      Tags:
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Target-Group-1'
+
+  #
+  # SNS Topics
+  #
+  NotificationTopic1:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      Subscription:
+        - Endpoint:
+            !Ref OperatorEmail
+          Protocol: email
+  
+  #
+  # Database Instance
+  #
+  MongoInstance:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-instance.html
+    Type: AWS::EC2::Instance
+    DependsOn: 
+      - RouteTableInternet
+      - RouteTablePrivate
+      - SubnetMongo1
+      - SubnetMongo2
+      - SecurityGroupMongo 
+      - NATGateway
+    Properties:
+      SubnetId: !Ref SubnetMongo1
+      Tags: 
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-MongoDB'          
+      KeyName:
+        !Ref KeyName
+      DisableApiTermination: false
+      Monitoring: false
+      ImageId:
+        !FindInMap [AWSInstanceRegionMap, !Ref "AWS::Region", HVM64]
+      SecurityGroupIds:
+        - !Ref SecurityGroupMongo
+      InstanceType:
+        !Ref InstanceType
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          echo -n 'W21vbmdvZGItb3JnLTQuNF0KbmFtZT1Nb25nb0RCIFJlcG9zaXRvcnkKYmFzZXVybD1odHRwczovL3JlcG8ubW9uZ29kYi5vcmcveXVtL2FtYXpvbi8yL21vbmdvZGItb3JnLzQuNC94ODZfNjQvCmdwZ2NoZWNrPTEKZW5hYmxlZD0xCmdwZ2tleT1odHRwczovL3d3dy5tb25nb2RiLm9yZy9zdGF0aWMvcGdwL3NlcnZlci00LjQuYXNjCg==' | base64 -d > /etc/yum.repos.d/mongodb-org.repo
+          yum install -y htop mongodb-org
+          # Make MongoDB listen on all interfaces
+          sed -i 's/bindIp: 127.0.0.1/bindIp: 0.0.0.0/' /etc/mongod.conf
+          # Enable and start MongoDB
+          systemctl enable mongod
+          systemctl start mongod
+          # Create Mongo collections and insert a few documents
+          echo 'dXNlIHMzdXBsb2FkCmRiLmNyZWF0ZUNvbGxlY3Rpb24oICdmaWxlVHlwZXMnLCB7fSApCmRiLmNyZWF0ZUNvbGxlY3Rpb24oICdmaWxlcycsIHt9ICkKZGIuY3JlYXRlQ29sbGVjdGlvbiggJ29yaWdpbnMnLCB7fSApCmRiLmZpbGVUeXBlcy5pbnNlcnRPbmUoewogICAgICAgICJ0eXBlIjogImJvb2siLAogICAgICAgICJ0ZXh0IjogIkJvb2tzIiwKICAgICAgICAiaGVscCI6ICJCb29rcyBtdXN0IG1lIGluIFBERiBmb3JtYXQuIE1heCBmaWxlIHNpemUgaXMgMU1CLiIsCiAgICAgICAgImV4dGVuc2lvbnMiOiBbICJwZGYiIF0sCiAgICAgICAgIm1pbWV0eXBlcyI6IFsgImFwcGxpY2F0aW9uL3BkZiIgXSwKICAgICAgICAiYnVja2V0IjoiZm9vLnJ5YW53ZW5kZWwuY29tIiwKICAgICAgICAicGF0aCI6ImJvb2tzIgogICAgfQopCmRiLmZpbGVUeXBlcy5pbnNlcnRPbmUoewogICAgICAgICJ0eXBlIjogImltYWdlIiwKICAgICAgICAidGV4dCI6ICJJbWFnZXMiLAogICAgICAgICJoZWxwIjogIkltYWdlcyBtdXN0IGJlIGluIEpQRywgSlBFRywgUE5HLCBvciBHSUYgZm9ybWF0LiBNYXggZmlsZSBzaXplIGlzIDFNQi4iLAogICAgICAgICJleHRlbnNpb25zIjogWyAianBnIiwgImpwZWciLCAicG5nIiwgImdpZiIgXSwKICAgICAgICAibWltZXR5cGVzIjogWyAiaW1hZ2UvanBlZyIsICJpbWFnZS9wbmciLCAiaW1hZ2UvZ2lmIiBdLAogICAgICAgICJidWNrZXQiOiJiYXIucnlhbndlbmRlbC5jb20iLAogICAgICAgICJwYXRoIjoiZmlsZXMvaW1hZ2VzIgogICAgfQopCg==' | base64 -d | mongo
+          # Insert an origin document to help with CORS
+          echo -e 'use s3upload\ndb.origins.insertOne({"origin": "http://${WebBucketName}.s3-website.${AWS::Region}.amazonaws.com"})' | mongo
+          # Finish up by setting passwords on everything
+          echo 'dXNlIHMzdXBsb2FkCmRiLmNyZWF0ZVVzZXIoewogICAgICAgIHVzZXI6ICJzM3VwbG9hZCIsCiAgICAgICAgcHdkOiAiUzNVcGxvYWRCQlEiLAogICAgICAgIHJvbGVzOiBbIHsgcm9sZTogInJlYWRXcml0ZSIsIGRiOiAiczN1cGxvYWQiIH0gXQogICAgfQopCnVzZSBhZG1pbgpkYi5jcmVhdGVVc2VyKHsKICAgICAgICB1c2VyOiAicm9vdCIsCiAgICAgICAgcHdkOiAiQmFkUGFzc3dvcmQxMjMhIiwKICAgICAgICByb2xlczogWyB7IHJvbGU6ICJ1c2VyQWRtaW5BbnlEYXRhYmFzZSIsIGRiOiAiYWRtaW4iIH0sICJyZWFkV3JpdGVBbnlEYXRhYmFzZSIgXQogICAgfQopCg==' | base64 -d | mongo
+          # Enable security for MongoDB
+          echo -e 'security:\n    authorization: enabled' >> /etc/mongod.conf
+          # Restart MongoDB
+          systemctl restart mongod
+        
+  #
+  # Bastion Instance
+  #
+  BastionInstance:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-instance.html
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - RouteTableInternet
+      - RouteTablePrivate
+      - SubnetBastion
+      - SecurityGroupBastion
+      - NATGateway
+    Properties:
+      SubnetId: !Ref SubnetBastion
+      Tags: 
+        - Key: Name
+          Value: !Sub '${NamingPrefix}-Bastion'          
+      KeyName:
+        !Ref KeyName
+      DisableApiTermination: false
+      Monitoring: false
+      ImageId:
+        !FindInMap [AWSInstanceRegionMap, !Ref "AWS::Region", HVM64]
+      SecurityGroupIds:
+        - !Ref SecurityGroupBastion
+      InstanceType:
+        !Ref InstanceType
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          yum install -y htop
+          
+  BastionEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref BastionInstance
+      Domain: VPC
+        
+  #
+  # Auto Scaling Groups
+  #   
+  InstanceScaleGroup1:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    DependsOn:
+      - RouteTableInternet
+      - RouteTablePrivate
+      - NATGateway
+      - TargetGroup1
+      - InstanceProfile
+    Properties:
+      Tags: 
+        - Key: env
+          Value: s3upload 
+          PropagateAtLaunch: true
+        - Key: owner
+          Value: ryan 
+          PropagateAtLaunch: true
+      AvailabilityZones:
+        - !Ref AvailabilityZone1
+        - !Ref AvailabilityZone2
+      VPCZoneIdentifier:
+        - !Ref SubnetPrivate1
+        - !Ref SubnetPrivate2
+      LaunchConfigurationName:
+        !Ref LaunchConfig1
+      MinSize: 1
+      MaxSize: 3
+      TargetGroupARNs:
+        - !Ref TargetGroup1
+      NotificationConfiguration:
+        TopicARN:
+          !Ref NotificationTopic1
+        NotificationTypes:
+          - 'autoscaling:EC2_INSTANCE_LAUNCH'
+          - 'autoscaling:EC2_INSTANCE_LAUNCH_ERROR'
+          - 'autoscaling:EC2_INSTANCE_TERMINATE'
+          - 'autoscaling:EC2_INSTANCE_TERMINATE_ERROR'
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT10M
+        Count: 1
+    UpdatePolicy:
+      AutoScalingScheduledAction:
+        IgnoreUnmodifiedGroupSizeProperties: true
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT10M
+        WaitOnResourceSignals: true
+        
+  LaunchConfig1:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Metadata:
+      Comment: Install a simple application
+      'AWS::CloudFormation::Init':
+        configSets:
+          install_all:
+            - install_cfn
+            - install_logs
+            - install_nodejs
+            - install_codedeploy
+        install_cfn:
+          files:
+            /etc/cfn/cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+              mode: '000400'
+              owner: root
+              group: root
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.LaunchConfig1.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource LaunchConfig1 --configsets install_all --region ${AWS::Region}
+                runas=root
+                mode: '000400'
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: 'true'
+                ensureRunning: 'true'
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+        install_logs:
+          packages:
+            yum:
+              awslogs: []
+          files:
+            /etc/awslogs/awslogs.conf:
+              content: !Sub
+                - |
+                  [general]
+                  state_file = /var/awslogs/state/agent-state
+
+                  [/var/log/cloud-init.log]
+                  file = /var/log/cloud-init.log
+                  log_group_name = ${LocalCloudFormationLogs}
+                  log_stream_name = {instance_id}/cloud-init.log
+                  datetime_format = 
+  
+                  [/var/log/cloud-init-output.log]
+                  file = /var/log/cloud-init-output.log
+                  log_group_name = ${LocalCloudFormationLogs}
+  
+                  log_stream_name = {instance_id}/cloud-init-output.log
+                  datetime_format = 
+  
+                  [/var/log/cfn-init.log]
+                  file = /var/log/cfn-init.log
+                  log_group_name = ${LocalCloudFormationLogs}
+                  log_stream_name = {instance_id}/cfn-init.log
+                  datetime_format = 
+  
+                  [/var/log/cfn-hup.log]
+                  file = /var/log/cfn-hup.log
+                  log_group_name = ${LocalCloudFormationLogs}
+                  log_stream_name = {instance_id}/cfn-hup.log
+                  datetime_format = 
+  
+                  [/var/log/cfn-wire.log]
+                  file = /var/log/cfn-wire.log
+                  log_group_name = ${LocalCloudFormationLogs}
+                  log_stream_name = {instance_id}/cfn-wire.log
+                  datetime_format = 
+  
+                  [/var/log/httpd]
+                  file = /var/log/httpd/*
+                  log_group_name = ${LocalCloudFormationLogs}
+                  log_stream_name = {instance_id}/httpd
+                  datetime_format = %d/%b/%Y:%H:%M:%S
+                - {
+                    LocalCloudFormationLogs: !Ref CloudFormationLogs
+                  }
+              mode: '000444'
+              owner: root
+              group: root
+            /etc/awslogs/awscli.conf:
+              content: !Sub |
+                [plugins]
+                cwlogs = cwlogs
+                [default]
+                region = ${AWS::Region}
+              mode: '000444'
+              owner: root
+              group: root
+          commands:
+            1_create_state_directory:
+              command: mkdir -p /var/awslogs/state
+          services:
+            sysvinit:
+              awslogsd:
+                enabled: 'true'
+                ensureRunning: 'true'
+                files:
+                  - /etc/awslogs/awslogs.conf
+        install_nodejs:
+          files:
+            /tmp/deploy_node_environment.sh:
+              content: !Sub |
+                #!/bin/bash -xe
+                # install node
+                curl -fsSL https://rpm.nodesource.com/setup_15.x | bash -
+                yum install -y nodejs
+                # spin up stub server on TCP port 80
+                echo 'bWtkaXIgL3RtcC9zdHViCmNkIC90bXAvc3R1YgpucG0gaW5pdCAteSA+L2Rldi9udWxsIDI+JjEKY2F0IDw8IEVPRiA+IC90bXAvc3R1Yi9pbmRleC5qcwpjb25zdCBodHRwID0gcmVxdWlyZSgnaHR0cCcpOwpjb25zdCByZXF1ZXN0TGlzdGVuZXIgPSBmdW5jdGlvbiAocmVxLCByZXMpIHsKICByZXMud3JpdGVIZWFkKDIwMCk7CiAgcmVzLmVuZCgnU2VydmVyIHVwJyk7Cn0KY29uc3Qgc2VydmVyID0gaHR0cC5jcmVhdGVTZXJ2ZXIocmVxdWVzdExpc3RlbmVyKTsKc2VydmVyLmxpc3Rlbig4MCk7CkVPRgpub2RlIGluZGV4LmpzID4vZGV2L251bGwgMj4mMSAmCgo=' | base64 -d | bash
+              mode: '000755'
+              owner: root
+              group: root
+          commands:
+            1_deploy_node_environment:
+              command: /tmp/deploy_node_environment.sh >/dev/null 2>&1
+        install_httpd:
+          packages:
+            yum:
+              httpd: []
+          files:
+            /var/www/html/index.html:
+              content: !Sub 
+                - |
+                  <img src="${LocalSource}/cloudformation_graphic.png" alt="AWS CloudFormation Logo"/>
+                  <h1>Congratulations, you have successfully launched the AWS CloudFormation sample.</h1>
+                - {
+                    LocalSource: !FindInMap [Region2Examples, !Ref "AWS::Region", Examples]
+                  }
+              mode: '000644'
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              httpd:
+                enabled: 'true'
+                ensureRunning: 'true'
+        install_codedeploy:
+          files:
+            /tmp/deploy_codedeploy.sh:
+              content: !Sub |
+                #!/bin/bash -xe
+                # Install CodeDeploy Agent
+                yum install -y ruby 
+                cd /tmp
+                wget https://aws-codedeploy-us-east-2.s3.amazonaws.com/latest/install 
+                chmod +x ./install 
+                ./install auto 
+                systemctl enable codedeploy-agent 
+              mode: '000755'
+              owner: root
+              group: root
+          commands:
+            1_deploy_node_environment:
+              command: /tmp/deploy_codedeploy.sh
+    Properties:
+      KeyName:
+        !Ref KeyName
+      InstanceMonitoring: false
+      ImageId:
+        !FindInMap [AWSInstanceRegionMap, !Ref "AWS::Region", HVM64]
+      SecurityGroups:
+        - !Ref SecurityGroupPrivate
+      InstanceType:
+        !Ref InstanceType
+      IamInstanceProfile:
+        !Ref InstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          # This is needed for cfn-init to reinitialize the instances with the new version on updates
+          BUILD_VERSION="${BuildVersion}"
+          # Set the "Name" tag
+          INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+          TAG_VALUE="${NamingPrefix}-${!INSTANCE_ID}"
+          aws ec2 create-tags --resources "${!INSTANCE_ID}" --tag Key=Name,Value="${!TAG_VALUE}" --region=${AWS::Region}
+          # Install cfn-bootstrap
+          yum update -y aws-cfn-bootstrap
+          # Kick off the cfn initialization
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource LaunchConfig1 --configsets install_all --region ${AWS::Region}
+          # Signal that we're done
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource InstanceScaleGroup1 --region ${AWS::Region}
+          # Start CodeDeploy Agent
+          systemctl start codedeploy-agent
+
+  ScaleUpPolicy1:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName:
+        !Ref InstanceScaleGroup1
+      Cooldown: 60
+      ScalingAdjustment: 1
+
+  ScaleDownPolicy1:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName:
+        !Ref InstanceScaleGroup1
+      Cooldown: 60
+      ScalingAdjustment: -1
+
+  AlarmCpuHigh:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-up if CPU > 90% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      AlarmActions:
+        - !Ref ScaleUpPolicy1
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            !Ref InstanceScaleGroup1
+      ComparisonOperator: GreaterThanThreshold
+
+  AlarmCpuLow:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-down if CPU < 50% for 10 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 50
+      AlarmActions:
+        - !Ref ScaleDownPolicy1
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            !Ref InstanceScaleGroup1
+      ComparisonOperator: LessThanThreshold
+
+#
+# Outputs
+#
+Outputs:
+  LoadBalancer1Url:
+    Description: The URL of the App ALB
+    Value: !GetAtt LoadBalancer1.DNSName
+    
+  WebBucketURL:
+    Description: URL for website hosted on S3
+    Value: !GetAtt WebBucket.WebsiteURL
+    
+  MongoInstanceIP:
+    Description: Private IP address of the MongoDB Instance
+    Value: !GetAtt MongoInstance.PrivateIp
